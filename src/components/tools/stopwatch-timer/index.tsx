@@ -59,6 +59,7 @@ interface TimerSettings {
   soundEnabled: boolean;
   autoRestart: boolean;
   customMessage: string;
+  hideMilliseconds: boolean;
 }
 
 interface StopwatchSettings {
@@ -140,6 +141,7 @@ export default function StopwatchTimer() {
     soundEnabled: true,
     autoRestart: false,
     customMessage: "Timer finished!",
+    hideMilliseconds: true,
   });
 
   const [stopwatchSettings, setStopwatchSettings] = useState<StopwatchSettings>(
@@ -179,6 +181,10 @@ export default function StopwatchTimer() {
   const stopwatchInterval = useRef<NodeJS.Timeout | null>(null);
   const timerInterval = useRef<NodeJS.Timeout | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
+  const stopwatchStartTime = useRef<number | null>(null);
+  const timerStartTime = useRef<number | null>(null);
+  const stopwatchPausedTime = useRef<number>(0);
+  const timerRemainingTime = useRef<number>(0);
 
   // Load settings and presets from localStorage
   useEffect(() => {
@@ -229,6 +235,92 @@ export default function StopwatchTimer() {
     savePresets();
   }, [timerPresets, savePresets]);
 
+  // Page Visibility API handler
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        // Tab is being hidden - store current state
+        if (stopwatchRunning && stopwatchStartTime.current) {
+          stopwatchPausedTime.current = stopwatchTime;
+        }
+        if (timerRunning && timerStartTime.current) {
+          timerRemainingTime.current = timerTime;
+        }
+      } else {
+        // Tab is becoming visible - update times
+        if (stopwatchRunning && stopwatchStartTime.current) {
+          const currentTime = Date.now();
+          const elapsedSinceStart = Math.floor(
+            (currentTime - stopwatchStartTime.current) / 10,
+          );
+          setStopwatchTime(elapsedSinceStart);
+        }
+        if (timerRunning && timerStartTime.current) {
+          const currentTime = Date.now();
+          const elapsedSinceStart = Math.floor(
+            (currentTime - timerStartTime.current) / 10,
+          );
+          const newTime = Math.max(
+            0,
+            timerRemainingTime.current - elapsedSinceStart,
+          );
+          setTimerTime(newTime);
+
+          if (newTime <= 0 && !timerFinished) {
+            setTimerRunning(false);
+            setTimerFinished(true);
+            if (timerSettings.soundEnabled) {
+              // Create a simple beep function for the visibility handler
+              const beep = (frequency = 800, duration = 200) => {
+                try {
+                  const audioCtx = new (window.AudioContext ||
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    (window as any).webkitAudioContext)();
+                  const oscillator = audioCtx.createOscillator();
+                  const gainNode = audioCtx.createGain();
+                  oscillator.connect(gainNode);
+                  gainNode.connect(audioCtx.destination);
+                  oscillator.frequency.value = frequency;
+                  oscillator.type = "sine";
+                  gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime);
+                  gainNode.gain.exponentialRampToValueAtTime(
+                    0.01,
+                    audioCtx.currentTime + duration / 1000,
+                  );
+                  oscillator.start(audioCtx.currentTime);
+                  oscillator.stop(audioCtx.currentTime + duration / 1000);
+                } catch (error) {
+                  console.warn("Could not play sound:", error);
+                }
+              };
+
+              for (let i = 0; i < 3; i++) {
+                setTimeout(() => beep(1500, 500), i * 600);
+              }
+            }
+            if (window.Notification && Notification.permission === "granted") {
+              new Notification("Timer Finished", {
+                body: timerSettings.customMessage,
+                icon: "/favicon.ico",
+              });
+            }
+          }
+        }
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () =>
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [
+    stopwatchRunning,
+    timerRunning,
+    stopwatchTime,
+    timerTime,
+    timerFinished,
+    timerSettings,
+  ]);
+
   // Audio functions
   const playBeep = useCallback((frequency = 800, duration = 200) => {
     if (!audioContext.current) {
@@ -262,18 +354,18 @@ export default function StopwatchTimer() {
       time: number,
       precision: "centiseconds" | "milliseconds" = "centiseconds",
     ): string => {
-      const totalMs = Math.floor(time / 10);
-      const hours = Math.floor(totalMs / 3600000);
-      const minutes = Math.floor((totalMs % 3600000) / 60000);
-      const seconds = Math.floor((totalMs % 60000) / 1000);
+      const totalSeconds = Math.floor(time / 100);
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
 
       if (precision === "milliseconds") {
-        const ms = totalMs % 1000;
+        const ms = (time % 100) * 10;
         if (hours > 0)
           return `${hours}:${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}.${ms.toString().padStart(3, "0")}`;
         return `${minutes}:${seconds.toString().padStart(2, "0")}.${ms.toString().padStart(3, "0")}`;
       } else {
-        const centiseconds = Math.floor((totalMs % 1000) / 10);
+        const centiseconds = time % 100;
         if (hours > 0)
           return `${hours}:${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}.${centiseconds.toString().padStart(2, "0")}`;
         return `${minutes}:${seconds.toString().padStart(2, "0")}.${centiseconds.toString().padStart(2, "0")}`;
@@ -282,17 +374,57 @@ export default function StopwatchTimer() {
     [],
   );
 
+  // Format time for timer (with hideMilliseconds option)
+  const formatTimerTime = useCallback(
+    (time: number): string => {
+      const totalSeconds = Math.floor(time / 100);
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
+
+      if (timerSettings.hideMilliseconds) {
+        if (hours > 0)
+          return `${hours}:${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
+        return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+      } else {
+        const centiseconds = time % 100;
+        if (hours > 0)
+          return `${hours}:${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}.${centiseconds.toString().padStart(2, "0")}`;
+        return `${minutes}:${seconds.toString().padStart(2, "0")}.${centiseconds.toString().padStart(2, "0")}`;
+      }
+    },
+    [timerSettings.hideMilliseconds],
+  );
+
   // Stopwatch functions
   const startStopwatch = useCallback(() => {
     if (!stopwatchRunning) {
+      const currentTime = Date.now();
+      if (stopwatchTime === 0) {
+        stopwatchStartTime.current = currentTime;
+      } else {
+        // Resuming from pause - adjust start time
+        stopwatchStartTime.current = currentTime - stopwatchTime * 10;
+      }
+
       setStopwatchRunning(true);
       if (stopwatchSettings.soundEnabled) playBeep(1000, 100);
 
       stopwatchInterval.current = setInterval(() => {
-        setStopwatchTime((prev) => prev + 1);
+        if (stopwatchStartTime.current) {
+          const elapsedTime = Math.floor(
+            (Date.now() - stopwatchStartTime.current) / 10,
+          );
+          setStopwatchTime(elapsedTime);
+        }
       }, 10);
     }
-  }, [stopwatchRunning, stopwatchSettings.soundEnabled, playBeep]);
+  }, [
+    stopwatchRunning,
+    stopwatchTime,
+    stopwatchSettings.soundEnabled,
+    playBeep,
+  ]);
 
   const pauseStopwatch = useCallback(() => {
     setStopwatchRunning(false);
@@ -308,6 +440,8 @@ export default function StopwatchTimer() {
     setStopwatchTime(0);
     setLapTimes([]);
     setLapCounter(0);
+    stopwatchStartTime.current = null;
+    stopwatchPausedTime.current = 0;
     if (stopwatchInterval.current) {
       clearInterval(stopwatchInterval.current);
       stopwatchInterval.current = null;
@@ -343,6 +477,8 @@ export default function StopwatchTimer() {
 
   // Timer functions
   const startTimer = useCallback(() => {
+    const currentTime = Date.now();
+
     if (timerTime <= 0) {
       const totalSeconds =
         timerSettings.hours * 3600 +
@@ -350,8 +486,15 @@ export default function StopwatchTimer() {
         timerSettings.seconds;
       if (totalSeconds <= 0) return;
 
-      setTimerTime(totalSeconds * 100);
-      setTimerInitialTime(totalSeconds * 100);
+      const initialTime = totalSeconds * 100;
+      setTimerTime(initialTime);
+      setTimerInitialTime(initialTime);
+      timerStartTime.current = currentTime;
+      timerRemainingTime.current = initialTime;
+    } else {
+      // Resuming from pause - adjust start time based on remaining time
+      timerStartTime.current = currentTime;
+      timerRemainingTime.current = timerTime;
     }
 
     setTimerRunning(true);
@@ -359,10 +502,21 @@ export default function StopwatchTimer() {
     if (timerSettings.soundEnabled) playBeep(1000, 100);
 
     timerInterval.current = setInterval(() => {
-      setTimerTime((prev) => {
-        if (prev <= 1) {
+      if (timerStartTime.current) {
+        const elapsedTime = Math.floor(
+          (Date.now() - timerStartTime.current) / 10,
+        );
+        const newTime = Math.max(0, timerRemainingTime.current - elapsedTime);
+        setTimerTime(newTime);
+
+        if (newTime <= 0) {
           setTimerRunning(false);
           setTimerFinished(true);
+          if (timerInterval.current) {
+            clearInterval(timerInterval.current);
+            timerInterval.current = null;
+          }
+
           if (timerSettings.soundEnabled) {
             for (let i = 0; i < 3; i++) {
               setTimeout(() => playBeep(1500, 500), i * 600);
@@ -383,16 +537,16 @@ export default function StopwatchTimer() {
                 timerSettings.hours * 3600 +
                 timerSettings.minutes * 60 +
                 timerSettings.seconds;
-              setTimerTime(totalSeconds * 100);
-              setTimerInitialTime(totalSeconds * 100);
+              const restartTime = totalSeconds * 100;
+              setTimerTime(restartTime);
+              setTimerInitialTime(restartTime);
+              timerStartTime.current = Date.now();
+              timerRemainingTime.current = restartTime;
               setTimerRunning(true);
             }, 3000);
           }
-
-          return 0;
         }
-        return prev - 1;
-      });
+      }
     }, 10);
   }, [timerTime, timerSettings, playBeep]);
 
@@ -492,6 +646,8 @@ export default function StopwatchTimer() {
     setTimerTime(0);
     setTimerInitialTime(0);
     setTimerFinished(false);
+    timerStartTime.current = null;
+    timerRemainingTime.current = 0;
     if (timerInterval.current) {
       clearInterval(timerInterval.current);
       timerInterval.current = null;
@@ -780,7 +936,7 @@ export default function StopwatchTimer() {
 
                 <div className="text-center">
                   <div className="mb-4 font-mono text-4xl font-bold leading-none text-white sm:text-6xl md:text-8xl">
-                    {formatTime(timerTime)}
+                    {formatTimerTime(timerTime)}
                   </div>
 
                   {timerInitialTime > 0 && (
@@ -1230,6 +1386,21 @@ export default function StopwatchTimer() {
                       />
                     </div>
 
+                    <div className="flex items-center justify-between">
+                      <Label className="text-sm sm:text-base">
+                        Hide Milliseconds
+                      </Label>
+                      <Switch
+                        checked={timerSettings.hideMilliseconds}
+                        onCheckedChange={(checked) =>
+                          setTimerSettings((prev) => ({
+                            ...prev,
+                            hideMilliseconds: checked,
+                          }))
+                        }
+                      />
+                    </div>
+
                     <div>
                       <Label className="text-sm sm:text-base">
                         Custom Message
@@ -1263,6 +1434,7 @@ export default function StopwatchTimer() {
                       soundEnabled: true,
                       autoRestart: false,
                       customMessage: "Timer finished!",
+                      hideMilliseconds: true,
                     });
                     setStopwatchSettings({
                       soundEnabled: true,
